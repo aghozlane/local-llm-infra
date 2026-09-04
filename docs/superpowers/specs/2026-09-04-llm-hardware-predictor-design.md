@@ -71,6 +71,7 @@ L'outil affiche explicitement ses hypothèses et son ordre de grandeur (±25-30 
 | **Nb de GPU** | `ceil(VRAM / VRAM_utilisable_par_GPU)` — tensor parallel implicite : poids et KV répartis. **Borne v1 : ≤ 8 GPU** |
 | **Débit décode par utilisateur (tok/s)** | Roofline par pas de décode : `tps_user = BW_eff / (A × bpw/8 + B × kv_octets_par_token × contexte_moyen)` où `B` = séquences simultanées, `contexte_moyen = tokens_entrée + tokens_sortie/2`, `BW_eff ≈ 85 %` de la bande passante catalogue. Débit agrégé = `B × tps_user` (hypothèse *continuous batching*) |
 | **TTFT (s)** | Préfill compute-bound : `2 × A × tokens_entrée / (FLOPS_gpu × η)`, `η ≈ 0,4` ; + attente de file si les préfills se sérialisent au-delà de la capacité |
+| **Charge offerte (tok/s)** | `utilisateurs_totaux × requêtes_util_min × (tokens_entrée + tokens_sortie) / 60` — comparée au débit agrégé soutenable : la config « absorbe la charge » ou non (✓/✗ affiché) |
 | **RAM système** | `max(64 Go, 1,5 × VRAM_totale)` |
 
 **Pourquoi le KV domine** (exemple de validation) : Qwen3-30B-A3B (L=48, kv_h=4, d_h=128) → ~98 Ko de KV **par token et par séquence** → 16 K de contexte × 10 séquences ≈ **16 Go de KV**, contre ~18 Go de poids en Q4_K_M. Le KV cache croît avec le contexte ET le nombre de requêtes simultanées — c'est le point que l'outil doit rendre visible.
@@ -132,7 +133,7 @@ Prix au Go (une valeur, ex. ~5 €/Go DDR5 ECC).
 **Résultats (droite)** :
 
 1. **Mémoire** — camembert poids / KV / overhead + VRAM totale requise.
-2. **Performances** — TTFT et débit estimés, comparés aux cibles (✓/✗).
+2. **Performances** — TTFT et débit estimés, comparés aux cibles (✓/✗), et charge offerte vs capacité agrégée (✓/✗).
 3. **Recommandations** — jusqu'à 3 cartes (moins chère / équilibrée / confortable) : config, nb GPU, RAM, prix total EUR, simultanés supportés, tokens/s attendus.
 4. **BOM** — nomenclature ligne par ligne, prix unitaires, total (style devis).
 5. **Bandeau d'hypothèses** permanent (cf. §4.3).
