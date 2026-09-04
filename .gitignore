@@ -21,3 +21,6 @@ npm-debug.log*
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# État local OMO (run-continuation, plans de travail)
+.omo/
