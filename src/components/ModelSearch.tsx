@@ -174,6 +174,14 @@ export function ModelSearch({
                 MoE traité comme dense
               </span>
             )}
+            {selectedModel.resolvedFromBaseModel && (
+              <span
+                className="badge badge-warning"
+                title={`Architecture déduite du modèle de base : ${selectedModel.baseModelId ?? ''}`}
+              >
+                Architecture du modèle de base
+              </span>
+            )}
           </div>
         </div>
       )}

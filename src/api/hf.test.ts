@@ -48,6 +48,21 @@ const QWEN_ACTIVE_ROUTER = 48 * 2048 * 128; // gate to 128 experts, per layer
 const QWEN_ACTIVE_PARAMS =
   QWEN_ACTIVE_FFN + QWEN_ACTIVE_ATTENTION + QWEN_ACTIVE_EMBEDDINGS + QWEN_ACTIVE_ROUTER; // 3_352_821_760
 
+const GGUF_VARIANT_ID = 'Qwen/Qwen3.8-27B-GGUF';
+const BASE_ID = 'Qwen/Qwen3.8-27B';
+const BASE_META = {
+  id: BASE_ID,
+  safetensors: { total: 27_400_000_000 },
+};
+const BASE_CONFIG = {
+  num_hidden_layers: 48,
+  num_attention_heads: 32,
+  num_key_value_heads: 4,
+  head_dim: 128,
+  hidden_size: 4096,
+  vocab_size: 151_936,
+};
+
 function jsonResponse(body: unknown, status: number = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -111,6 +126,8 @@ describe('resolveModel (fetch mocké)', () => {
     expect(spec.headDimInferred).toBe(false);
     expect(spec.moeTreatedAsDense).toBe(false);
     expect(spec.activeParamsPartial).toBe(false);
+    expect(spec.resolvedFromBaseModel).toBe(false);
+    expect(spec.baseModelId).toBeUndefined();
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -215,6 +232,110 @@ describe('resolveModel (fetch mocké)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('retombe sur le modèle de base pour une variante GGUF (tag base_model), en conservant id/name de la variante', async () => {
+    const variantMetaUrl = `${HF}/api/models/${GGUF_VARIANT_ID}`;
+    const variantConfigUrl = `${HF}/${GGUF_VARIANT_ID}/resolve/main/config.json`;
+    const baseMetaUrl = `${HF}/api/models/${BASE_ID}`;
+    const baseConfigUrl = `${HF}/${BASE_ID}/resolve/main/config.json`;
+
+    const fetchMock = stubFetch({
+      // safetensors absent : la variante seule est irrésolvable…
+      [variantMetaUrl]: {
+        id: GGUF_VARIANT_ID,
+        tags: [`base_model:${BASE_ID}`],
+      },
+      // …mais le modèle de base est complet.
+      [baseMetaUrl]: BASE_META,
+      [baseConfigUrl]: BASE_CONFIG,
+    });
+
+    const spec: ResolvedModel = await resolveModel(GGUF_VARIANT_ID);
+
+    expect(spec.id).toBe(GGUF_VARIANT_ID);
+    expect(spec.name).toBe('Qwen3.8-27B-GGUF');
+    expect(spec.resolvedFromBaseModel).toBe(true);
+    expect(spec.baseModelId).toBe(BASE_ID);
+    // N et architecture viennent du modèle de base (GGUF même architecture).
+    expect(spec.totalParams).toBe(27_400_000_000);
+    expect(spec.numLayers).toBe(48);
+    expect(spec.numKvHeads).toBe(4);
+    expect(spec.headDim).toBe(128);
+
+    // La config de la variante GGUF ne doit jamais être interrogée.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      variantConfigUrl,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      baseMetaUrl,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      baseConfigUrl,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('retombe sur le modèle de base quand config.json de la variante est incomplet (HfConfigError), en gardant son N', async () => {
+    const variantMetaUrl = `${HF}/api/models/org/variant`;
+    const variantConfigUrl = `${HF}/org/variant/resolve/main/config.json`;
+    const baseMetaUrl = `${HF}/api/models/org/base`;
+    const baseConfigUrl = `${HF}/org/base/resolve/main/config.json`;
+
+    const fetchMock = stubFetch({
+      // safetensors présents, mais config.json incomplet…
+      [variantMetaUrl]: {
+        id: 'org/variant',
+        safetensors: { total: 8_000_000_000 },
+        tags: ['base_model:finetune:org/base'],
+      },
+      [variantConfigUrl]: { num_hidden_layers: 32 },
+      // …le modèle de base fournit l'architecture complète.
+      [baseMetaUrl]: { id: 'org/base', safetensors: { total: 8_030_000_000 } },
+      [baseConfigUrl]: {
+        num_hidden_layers: 32,
+        num_attention_heads: 32,
+        hidden_size: 4096,
+      },
+    });
+
+    const spec: ResolvedModel = await resolveModel('org/variant');
+
+    expect(spec.id).toBe('org/variant');
+    expect(spec.name).toBe('variant');
+    expect(spec.resolvedFromBaseModel).toBe(true);
+    expect(spec.baseModelId).toBe('org/base');
+    // N = celui de la variante (données propres disponibles) ; l'architecture
+    // vient de la config du modèle de base (kv_h et d_h déduits de celle-ci).
+    expect(spec.totalParams).toBe(8_000_000_000);
+    expect(spec.numLayers).toBe(32);
+    expect(spec.numKvHeads).toBe(32);
+    expect(spec.kvHeadsInferred).toBe(true);
+    expect(spec.headDim).toBe(128);
+    expect(spec.headDimInferred).toBe(true);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, variantMetaUrl, expect.anything());
+    expect(fetchMock).toHaveBeenNthCalledWith(2, variantConfigUrl, expect.anything());
+    expect(fetchMock).toHaveBeenNthCalledWith(3, baseMetaUrl, expect.anything());
+    expect(fetchMock).toHaveBeenNthCalledWith(4, baseConfigUrl, expect.anything());
+  });
+
+  it('échoue avec GgufRepoError pour une variante GGUF sans tag base_model', async () => {
+    const ggufMetaUrl = `${HF}/api/models/org/model-GGUF`;
+    const fetchMock = stubFetch({
+      [ggufMetaUrl]: {
+        id: 'org/model-GGUF',
+        tags: ['text-generation', 'gguf', 'language:fr'],
+      },
+    });
+
+    await expect(resolveModel('org/model-GGUF')).rejects.toBeInstanceOf(GgufRepoError);
+    // Aucun modèle de base connu : un seul appel réseau, pas de repli caché.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('échoue avec une erreur typée sur un rate limit HTTP 429', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: 'Too Many Requests' }, 429));
     vi.stubGlobal('fetch', fetchMock);
@@ -281,13 +402,26 @@ describe('searchModels (fetch mocké)', () => {
   it('interroge l’API HF (pipeline_tag=text-generation, limite 10), normalise la requête et transmet le signal', async () => {
     const searchUrl = `${HF}/api/models?search=qwen3&pipeline_tag=text-generation&limit=10`;
     const fetchMock = stubFetch({
-      [searchUrl]: [{ id: 'Qwen/Qwen3-30B-A3B' }, { id: 'Qwen/Qwen3-32B' }],
+      [searchUrl]: [
+        { id: 'Qwen/Qwen3-30B-A3B' },
+        {
+          id: 'Qwen/Qwen3.8-27B-GGUF',
+          tags: ['text-generation', 'base_model:quantized:Qwen/Qwen3-30B-A3B'],
+        },
+        { id: 'Qwen/Qwen3-32B' },
+      ],
     });
 
     const hits = await searchModels('  qwen3  ');
 
     expect(hits).toEqual([
       { id: 'Qwen/Qwen3-30B-A3B', name: 'Qwen3-30B-A3B' },
+      {
+        id: 'Qwen/Qwen3.8-27B-GGUF',
+        name: 'Qwen3.8-27B-GGUF',
+        baseModelId: 'Qwen/Qwen3-30B-A3B',
+        baseModelRelation: 'quantized',
+      },
       { id: 'Qwen/Qwen3-32B', name: 'Qwen3-32B' },
     ]);
     // Signal composite (appelant + timeout) : présence seulement, pas d'identité.

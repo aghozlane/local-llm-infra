@@ -28,6 +28,13 @@
  * throws a typed `HfError` subclass with a French message. HF being slow,
  * rate-limiting us or being down is NEVER converted into a result.
  *
+ * One documented, flagged fallback exists: a variant (GGUF, GPTQ, EXL3, bnb,
+ * merge…) whose own safetensors or config.json is unusable, but which
+ * declares its base model through `base_model:…` tags, is resolved from that
+ * base model's metadata + config.json (`resolvedFromBaseModel: true`,
+ * `baseModelId` set, variant `id`/`name` kept). No declared base model →
+ * the typed error stands.
+ *
  * No in-memory cache here on purpose: the design's "cache client en mémoire"
  * belongs to the UI wiring step, where freshness and invalidation are decided.
  */
@@ -62,6 +69,10 @@ export interface ModelSearchHit {
   readonly id: string;
   /** Short model name: the segment after the org slash of the repo id. */
   readonly name: string;
+  /** Repo id declared by a `base_model:…` tag (variant → base link). */
+  readonly baseModelId?: string;
+  /** Relation of the variant to its base (quantized, finetune, merge…). */
+  readonly baseModelRelation?: string;
 }
 
 /**
@@ -87,6 +98,16 @@ export interface ResolvedModel extends ModelSpec {
    * "valeurs déduites" badge).
    */
   readonly activeParamsPartial: boolean;
+  /**
+   * True when the architecture (N, L, kv_h, d_h, MoE…) was resolved from the
+   * model declared by the variant's `base_model:…` tag — GGUF/GPTQ/EXL3
+   * variants whose own safetensors or config.json are unusable. The `id` and
+   * `name` stay the variant's; the UI shows the "Architecture du modèle de
+   * base" badge.
+   */
+  readonly resolvedFromBaseModel: boolean;
+  /** Repo id of the base model used for the fallback resolution. */
+  readonly baseModelId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +248,53 @@ function shortName(id: string): string {
   return slashIndex === -1 ? id : id.slice(slashIndex + 1);
 }
 
+/** Tag prefix declaring a variant's base model on Hugging Face. */
+const BASE_MODEL_TAG_PREFIX = 'base_model:';
+
+/**
+ * Parses one HF `tags` entry: `base_model:<repo>` or
+ * `base_model:<relation>:<repo>` (relation: quantized, finetune, merge,
+ * adapter…). Returns `undefined` for anything that is not a well-formed
+ * base-model declaration.
+ */
+export function parseBaseModelTag(
+  tag: string,
+): { id: string; relation?: string } | undefined {
+  if (!tag.startsWith(BASE_MODEL_TAG_PREFIX)) return undefined;
+  const rest = tag.slice(BASE_MODEL_TAG_PREFIX.length);
+  const separatorIndex = rest.indexOf(':');
+  if (separatorIndex === -1) {
+    return rest.includes('/') ? { id: rest } : undefined;
+  }
+  const relation = rest.slice(0, separatorIndex);
+  const id = rest.slice(separatorIndex + 1);
+  if (
+    relation.length === 0 ||
+    id.length === 0 ||
+    relation.includes('/') ||
+    !id.includes('/')
+  ) {
+    return undefined;
+  }
+  return { id, relation };
+}
+
+/** First `base_model:…` tag of a HF payload (search hit or model metadata). */
+function baseModelFromTags(
+  payload: Record<string, unknown>,
+): { baseModelId: string; baseModelRelation?: string } | undefined {
+  const tags = payload['tags'];
+  if (!Array.isArray(tags)) return undefined;
+  for (const tag of tags) {
+    if (typeof tag !== 'string') continue;
+    const parsed = parseBaseModelTag(tag);
+    if (parsed !== undefined) {
+      return { baseModelId: parsed.id, baseModelRelation: parsed.relation };
+    }
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -252,9 +320,17 @@ export async function searchModels(
   if (!Array.isArray(payload)) throw new HfUnreachableError(MALFORMED_PAYLOAD);
   const hits: readonly unknown[] = payload;
   return hits.map((entry) => {
-    const id = isRecord(entry) ? optionalString(entry, 'id') : undefined;
+    if (!isRecord(entry)) throw new HfUnreachableError(MALFORMED_PAYLOAD);
+    const id = optionalString(entry, 'id');
     if (id === undefined) throw new HfUnreachableError(MALFORMED_PAYLOAD);
-    return { id, name: shortName(id) };
+    const baseModel = baseModelFromTags(entry);
+    if (baseModel === undefined) return { id, name: shortName(id) };
+    return {
+      id,
+      name: shortName(id),
+      baseModelId: baseModel.baseModelId,
+      baseModelRelation: baseModel.baseModelRelation,
+    };
   });
 }
 
@@ -372,17 +448,97 @@ function toResolvedModel(
     headDimInferred: headDimDirect === undefined,
     moeTreatedAsDense,
     activeParamsPartial,
+    resolvedFromBaseModel: false,
+  };
+}
+
+/**
+ * Fetches and maps `{repoId}/resolve/main/config.json` onto the engine
+ * `ModelSpec`. Throws `HfConfigError` when the config is missing, unreadable
+ * or incomplete beyond the documented fallbacks.
+ */
+async function resolveConfig(
+  repoId: string,
+  totalParams: number,
+  configRepo: string,
+  options: HfRequestOptions,
+): Promise<ResolvedModel> {
+  const configUrl = `${HF_BASE_URL}/${configRepo}/resolve/main/config.json`;
+  const configResponse = await hfFetch(
+    configUrl,
+    options,
+    () => new HfConfigError('config.json introuvable pour ce modèle'),
+  );
+  const configPayload = await readJson(
+    configResponse,
+    (cause) => new HfConfigError('config.json illisible pour ce modèle', { cause }),
+  );
+  if (!isRecord(configPayload)) {
+    throw new HfConfigError('config.json illisible pour ce modèle');
+  }
+  return toResolvedModel(repoId, totalParams, configPayload);
+}
+
+/**
+ * Fallback resolution through the base model declared by the variant's
+ * `base_model:…` tags: the base's metadata (safetensors when the variant has
+ * none of its own) and config.json supply the architecture, while the result
+ * keeps the variant's `id`/`name` and is flagged `resolvedFromBaseModel`.
+ * Every step keeps its typed error — a base model that is itself
+ * unresolvable fails loudly, never silently.
+ */
+async function resolveFromBaseModel(
+  variantId: string,
+  baseModel: { baseModelId: string; baseModelRelation?: string },
+  variantTotalParams: number | undefined,
+  options: HfRequestOptions,
+): Promise<ResolvedModel> {
+  const baseMetaUrl = `${HF_BASE_URL}/api/models/${baseModel.baseModelId}`;
+  const baseMetaResponse = await hfFetch(baseMetaUrl, options, (notFoundUrl) =>
+    new HfModelNotFoundError(`Modèle introuvable sur Hugging Face : ${notFoundUrl}`));
+  const baseMetaPayload = await readJson(
+    baseMetaResponse,
+    (cause) => new HfUnreachableError(MALFORMED_PAYLOAD, { cause }),
+  );
+  if (!isRecord(baseMetaPayload)) throw new HfUnreachableError(MALFORMED_PAYLOAD);
+  const baseTotalParams = isRecord(baseMetaPayload.safetensors)
+    ? optionalNumber(baseMetaPayload.safetensors, 'total')
+    : undefined;
+  const totalParams = variantTotalParams ?? baseTotalParams;
+  if (totalParams === undefined || totalParams <= 0) {
+    throw new GgufRepoError(GGUF_MESSAGE);
+  }
+  const baseRepoId = optionalString(baseMetaPayload, 'id') ?? baseModel.baseModelId;
+
+  const resolved = await resolveConfig(
+    baseRepoId,
+    totalParams,
+    baseModel.baseModelId,
+    options,
+  );
+  return {
+    ...resolved,
+    id: variantId,
+    name: shortName(variantId),
+    resolvedFromBaseModel: true,
+    baseModelId: baseModel.baseModelId,
   };
 }
 
 /**
  * Resolves one model from Hugging Face:
- * 1. `GET /api/models/{id}` → `safetensors.total` (N, MoE experts included).
+ * 1. `GET /api/models/{id}` → `safetensors.total` (N, MoE experts included)
+ *    and the `base_model:…` tags declaring the variant's base model.
  * 2. `GET {id}/resolve/main/config.json` → architecture fields.
  *
- * Repos without safetensors (`…-GGUF`, AWQ, GPTQ...) throw `GgufRepoError`
- * before any config fetch: the parameter count is not computable, the user
- * must point at the base model.
+ * Repos without safetensors (`…-GGUF`, AWQ, GPTQ, EXL3...) throw
+ * `GgufRepoError` before any config fetch — unless the variant declares a
+ * base model through its tags, in which case the resolution falls back to
+ * that base model's metadata + config.json (flagged `resolvedFromBaseModel`).
+ * A complete `safetensors.total` with an unusable config.json (`HfConfigError`)
+ * falls back the same way, keeping the variant's own `safetensors.total`.
+ * Without a declared base model the typed errors are thrown unchanged
+ * (design §7 — "pas de fallback caché").
  */
 export async function resolveModel(
   id: string,
@@ -400,26 +556,23 @@ export async function resolveModel(
     (cause) => new HfUnreachableError(MALFORMED_PAYLOAD, { cause }),
   );
   if (!isRecord(metaPayload)) throw new HfUnreachableError(MALFORMED_PAYLOAD);
+  const baseModel = baseModelFromTags(metaPayload);
   const totalParams = isRecord(metaPayload.safetensors)
     ? optionalNumber(metaPayload.safetensors, 'total')
     : undefined;
-  if (totalParams === undefined || totalParams <= 0) {
-    throw new GgufRepoError(GGUF_MESSAGE);
-  }
   const repoId = optionalString(metaPayload, 'id') ?? key;
 
-  const configUrl = `${HF_BASE_URL}/${key}/resolve/main/config.json`;
-  const configResponse = await hfFetch(
-    configUrl,
-    options,
-    () => new HfConfigError('config.json introuvable pour ce modèle'),
-  );
-  const configPayload = await readJson(
-    configResponse,
-    (cause) => new HfConfigError('config.json illisible pour ce modèle', { cause }),
-  );
-  if (!isRecord(configPayload)) {
-    throw new HfConfigError('config.json illisible pour ce modèle');
+  if (totalParams === undefined || totalParams <= 0) {
+    if (baseModel === undefined) throw new GgufRepoError(GGUF_MESSAGE);
+    return resolveFromBaseModel(repoId, baseModel, undefined, options);
   }
-  return toResolvedModel(repoId, totalParams, configPayload);
+
+  try {
+    return await resolveConfig(repoId, totalParams, key, options);
+  } catch (cause) {
+    if (cause instanceof HfConfigError && baseModel !== undefined) {
+      return resolveFromBaseModel(repoId, baseModel, totalParams, options);
+    }
+    throw cause;
+  }
 }
