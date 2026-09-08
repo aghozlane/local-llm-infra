@@ -24,7 +24,7 @@ interface LoadFormProps {
 }
 
 const QUANTS: readonly QuantName[] = ['FP16', 'Q8_0', 'Q6_K', 'Q5_K_M', 'Q4_K_M'];
-const CONTEXT_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072];
+export const CONTEXT_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
 const SAFETY_OPTIONS = [
   { value: '0.1', label: '10 %' },
   { value: '0.15', label: '15 %' },
