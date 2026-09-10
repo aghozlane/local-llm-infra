@@ -48,6 +48,30 @@ const QWEN_ACTIVE_ROUTER = 48 * 2048 * 128; // gate to 128 experts, per layer
 const QWEN_ACTIVE_PARAMS =
   QWEN_ACTIVE_FFN + QWEN_ACTIVE_ATTENTION + QWEN_ACTIVE_EMBEDDINGS + QWEN_ACTIVE_ROUTER; // 3_352_821_760
 
+/**
+ * config.json style Qwen3-VL (multimodal MoE) : l'architecture du décodeur
+ * texte vit dans `text_config`, aucun `num_hidden_layers` au premier niveau.
+ */
+const QWEN3VL_TEXT_CONFIG = {
+  model_type: 'qwen3_vl_moe_text',
+  num_hidden_layers: 48,
+  num_attention_heads: 32,
+  num_key_value_heads: 4,
+  head_dim: 128,
+  hidden_size: 2048,
+  vocab_size: 151_936,
+  tie_word_embeddings: false,
+  moe_intermediate_size: 768,
+  num_experts: 128,
+  num_experts_per_tok: 8,
+};
+const QWEN3VL_CONFIG = {
+  model_type: 'qwen3_vl_moe',
+  architectures: ['Qwen3VLMoeForConditionalGeneration'],
+  text_config: QWEN3VL_TEXT_CONFIG,
+  vision_config: { depth: 27, num_position_embeddings: 2304 },
+};
+
 const GGUF_VARIANT_ID = 'Qwen/Qwen3.8-27B-GGUF';
 const BASE_ID = 'Qwen/Qwen3.8-27B';
 const BASE_META = {
@@ -128,6 +152,7 @@ describe('resolveModel (fetch mocké)', () => {
     expect(spec.activeParamsPartial).toBe(false);
     expect(spec.resolvedFromBaseModel).toBe(false);
     expect(spec.baseModelId).toBeUndefined();
+    expect(spec.textConfigUsed).toBeUndefined(); // config texte pur : premier niveau
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -139,6 +164,116 @@ describe('resolveModel (fetch mocké)', () => {
       CONFIG_URL,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('résout un modèle multimodal Qwen3-VL : architecture dans text_config, textConfigUsed', async () => {
+    const vlId = 'Qwen/Qwen3-VL-30B-A3B-Instruct';
+    stubFetch({
+      [`${HF}/api/models/${vlId}`]: {
+        id: vlId,
+        safetensors: { total: 30_532_542_464 },
+      },
+      [`${HF}/${vlId}/resolve/main/config.json`]: QWEN3VL_CONFIG,
+    });
+
+    const spec: ResolvedModel = await resolveModel(vlId);
+
+    expect(spec.numLayers).toBe(48);
+    expect(spec.numKvHeads).toBe(4);
+    expect(spec.headDim).toBe(128);
+    expect(spec.isMoe).toBe(true);
+    expect(spec.numExpertsPerTok).toBe(8);
+    expect(spec.expertSize).toBe(QWEN_ACTIVE_PARAMS / 8);
+    expect(spec.activeParamsPerToken).toBe(QWEN_ACTIVE_PARAMS);
+    expect(spec.totalParams).toBe(30_532_542_464);
+    expect(spec.textConfigUsed).toBe(true);
+  });
+
+  it('résout un modèle multimodal Qwen3-Omni : architecture dans text_config, textConfigUsed', async () => {
+    const omniId = 'Qwen/Qwen3-Omni-30B-A3B-Instruct';
+    const omniConfig = {
+      model_type: 'qwen3_omni_moe',
+      architectures: ['Qwen3OmniMoeForConditionalGeneration'],
+      text_config: {
+        model_type: 'qwen3_omni_moe_text',
+        num_hidden_layers: 36,
+        num_attention_heads: 28,
+        num_key_value_heads: 4,
+        head_dim: 128,
+        hidden_size: 2048,
+        vocab_size: 151_936,
+        tie_word_embeddings: false,
+        moe_intermediate_size: 768,
+        num_experts: 128,
+        num_experts_per_tok: 8,
+      },
+      audio_config: { num_mel_bins: 128 },
+      vision_config: { depth: 27 },
+    };
+    stubFetch({
+      [`${HF}/api/models/${omniId}`]: {
+        id: omniId,
+        safetensors: { total: 35_000_000_000 },
+      },
+      [`${HF}/${omniId}/resolve/main/config.json`]: omniConfig,
+    });
+
+    const spec: ResolvedModel = await resolveModel(omniId);
+
+    expect(spec.numLayers).toBe(36);
+    expect(spec.numKvHeads).toBe(4);
+    expect(spec.headDim).toBe(128);
+    expect(spec.isMoe).toBe(true);
+    expect(spec.textConfigUsed).toBe(true);
+  });
+
+  it('préfère num_hidden_layers de premier niveau quand text_config est aussi présent', async () => {
+    stubFetch({
+      [`${HF}/api/models/org/mixed`]: {
+        id: 'org/mixed',
+        safetensors: { total: 8_000_000_000 },
+      },
+      [`${HF}/org/mixed/resolve/main/config.json`]: {
+        num_hidden_layers: 32,
+        num_attention_heads: 32,
+        hidden_size: 4096,
+        text_config: {
+          num_hidden_layers: 48,
+          num_attention_heads: 16,
+          hidden_size: 2048,
+        },
+      },
+    });
+
+    const spec: ResolvedModel = await resolveModel('org/mixed');
+
+    expect(spec.numLayers).toBe(32); // premier niveau, pas text_config
+    expect(spec.numKvHeads).toBe(32);
+    expect(spec.headDim).toBe(128);
+    expect(spec.textConfigUsed).toBeUndefined();
+  });
+
+  it('préserve textConfigUsed lors du repli sur le modèle de base', async () => {
+    const variantId = 'Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF';
+    const baseId = 'Qwen/Qwen3-VL-30B-A3B-Instruct';
+    stubFetch({
+      [`${HF}/api/models/${variantId}`]: {
+        id: variantId,
+        tags: [`base_model:${baseId}`],
+      },
+      [`${HF}/api/models/${baseId}`]: {
+        id: baseId,
+        safetensors: { total: 30_532_542_464 },
+      },
+      [`${HF}/${baseId}/resolve/main/config.json`]: QWEN3VL_CONFIG,
+    });
+
+    const spec: ResolvedModel = await resolveModel(variantId);
+
+    expect(spec.resolvedFromBaseModel).toBe(true);
+    expect(spec.baseModelId).toBe(baseId);
+    expect(spec.numLayers).toBe(48);
+    expect(spec.textConfigUsed).toBe(true);
   });
 
   it('applique les fallbacks kv_h ← num_attention_heads et d_h ← hidden/heads avec badge « valeurs déduites »', async () => {
