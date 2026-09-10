@@ -3,6 +3,7 @@ import { bpwFor } from '../engine/quantization';
 import type { QuantName } from '../engine/types';
 import type { ResolvedModel } from '../api/hf';
 import { formatDecimal } from '../lib/format';
+import { Tooltip } from './Tooltip';
 
 export interface FormState {
   readonly quant: QuantName;
@@ -85,7 +86,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
         <div className="form-grid">
           <div className="field">
             <label htmlFor="simultaneous" className="field-label">
-              Séquences simultanées
+              <Tooltip label="Nombre de requêtes que le serveur traite en parallèle en moyenne.">
+                Séquences simultanées
+              </Tooltip>
             </label>
             <input
               id="simultaneous"
@@ -100,7 +103,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="totalUsers" className="field-label">
-              Utilisateurs totaux
+              <Tooltip label="Nombre total d'utilisateurs actifs utilisé pour dimensionner la charge globale.">
+                Utilisateurs totaux
+              </Tooltip>
             </label>
             <input
               id="totalUsers"
@@ -115,7 +120,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="reqPerUserPerMin" className="field-label">
-              Requêtes / utilisateur / min
+              <Tooltip label="Fréquence moyenne à laquelle chaque utilisateur envoie une requête au serveur.">
+                Requêtes / utilisateur / min
+              </Tooltip>
             </label>
             <input
               id="reqPerUserPerMin"
@@ -130,7 +137,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="inputTokens" className="field-label">
-              Tokens d’entrée
+              <Tooltip label="Taille moyenne du prompt, en tokens (1 token ≈ 0,75 mot en français).">
+                Tokens d’entrée
+              </Tooltip>
             </label>
             <input
               id="inputTokens"
@@ -145,7 +154,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="outputTokens" className="field-label">
-              Tokens de sortie
+              <Tooltip label="Nombre moyen de tokens générés par le modèle pour chaque réponse.">
+                Tokens de sortie
+              </Tooltip>
             </label>
             <input
               id="outputTokens"
@@ -160,7 +171,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="contextMax" className="field-label">
-              Contexte max
+              <Tooltip label="Taille maximale du contexte (entrée + sortie) prise en compte pour estimer le cache KV.">
+                Contexte max
+              </Tooltip>
             </label>
             <div className="select-wrapper">
               <select
@@ -185,7 +198,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
         <div className="form-grid">
           <div className="field">
             <label htmlFor="ttftTargetSec" className="field-label">
-              TTFT max (s)
+              <Tooltip label="Time To First Token : délai maximal acceptable entre l'envoi de la requête et le premier token généré.">
+                TTFT max (s)
+              </Tooltip>
             </label>
             <input
               id="ttftTargetSec"
@@ -201,7 +216,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="minTpsPerUser" className="field-label">
-              Débit min / utilisateur (tok/s)
+              <Tooltip label="Débit minimal de tokens générés par seconde et par utilisateur en cours de génération.">
+                Débit min / utilisateur (tok/s)
+              </Tooltip>
             </label>
             <input
               id="minTpsPerUser"
@@ -217,7 +234,9 @@ export function LoadForm({ form, onChange, model }: LoadFormProps) {
 
           <div className="field">
             <label htmlFor="safetyMargin" className="field-label">
-              Marge de sécurité
+              <Tooltip label="Marge appliquée à la mémoire et au débit pour absorber les pics de charge.">
+                Marge de sécurité
+              </Tooltip>
             </label>
             <div className="select-wrapper">
               <select

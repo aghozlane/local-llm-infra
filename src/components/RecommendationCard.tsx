@@ -1,6 +1,7 @@
 import type { Recommendation } from '../engine/recommendations';
 import { formatCurrencyEur, formatGib, formatSeconds, formatTps } from '../lib/format';
 import { BomTable } from './BomTable';
+import { Tooltip } from './Tooltip';
 
 interface RecommendationCardProps {
   readonly recommendation: Recommendation;
@@ -50,7 +51,11 @@ export function RecommendationCard({ recommendation }: RecommendationCardProps) 
           <span className="metric-value">{formatTps(sizing.tpsPerUser)}</span>
         </div>
         <div className="metric">
-          <span className="metric-label">TTFT</span>
+          <span className="metric-label">
+            <Tooltip label="Time To First Token : temps entre l'envoi de la requête et le premier token généré.">
+              TTFT
+            </Tooltip>
+          </span>
           <span className="metric-value">{formatSeconds(sizing.ttftSeconds)}</span>
         </div>
       </div>

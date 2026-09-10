@@ -1,12 +1,14 @@
 import type { SizingResult } from '../engine/types';
 import { formatDecimal, formatTps } from '../lib/format';
 import { IconCheck, IconCross, IconWarning } from './Icon';
+import { Tooltip } from './Tooltip';
+import type { ReactNode } from 'react';
 
 interface PerformanceCardProps {
   readonly sizing: SizingResult;
 }
 
-function TargetBadge({ met, label }: { readonly met: boolean | null; readonly label: string }) {
+function TargetBadge({ met, label }: { readonly met: boolean | null; readonly label: ReactNode }) {
   if (met === null) {
     return (
       <span className="badge badge-neutral" title={`Aucune cible ${label}`}>
@@ -37,7 +39,11 @@ export function PerformanceCard({ sizing }: PerformanceCardProps) {
 
       <div className="metrics-grid">
         <div className="metric">
-          <span className="metric-label">TTFT</span>
+          <span className="metric-label">
+            <Tooltip label="Time To First Token : temps entre l'envoi de la requête et le premier token généré.">
+              TTFT
+            </Tooltip>
+          </span>
           <span className="metric-value">{formatDecimal(sizing.ttftSeconds)} s</span>
         </div>
         <div className="metric">
@@ -66,7 +72,14 @@ export function PerformanceCard({ sizing }: PerformanceCardProps) {
       </div>
 
       <div className="target-badges cluster">
-        <TargetBadge met={sizing.ttftTargetMet} label="TTFT" />
+        <TargetBadge
+          met={sizing.ttftTargetMet}
+          label={
+            <Tooltip label="Time To First Token : temps entre l'envoi de la requête et le premier token généré.">
+              TTFT
+            </Tooltip>
+          }
+        />
         <TargetBadge met={sizing.tpsTargetMet} label="TPS" />
       </div>
 
