@@ -13,6 +13,10 @@
  * "valeurs déduites" badge (plan section "Résolution du modèle (HF)"):
  * - `kv_h`  ← `num_attention_heads` when `num_key_value_heads` is absent;
  * - `d_h`   ← `hidden_size / num_attention_heads` when `head_dim` is absent;
+ * - multimodal models (Qwen3-VL, Qwen3-Omni…) whose top-level config.json has
+ *   no `num_hidden_layers`: the LLM decoder architecture is read from the
+ *   nested `text_config` (`textConfigUsed` set); a top-level
+ *   `num_hidden_layers` always wins when present;
  * - a MoE whose expert structure is missing is flagged `moeTreatedAsDense`
  *   and stays dense for the engine (design §7: "traité comme dense +
  *   avertissement"), never a silent guess;
@@ -108,6 +112,14 @@ export interface ResolvedModel extends ModelSpec {
   readonly resolvedFromBaseModel: boolean;
   /** Repo id of the base model used for the fallback resolution. */
   readonly baseModelId?: string;
+  /**
+   * True when the LLM decoder architecture (N, L, kv_h, d_h, MoE…) was read
+   * from the nested `text_config` of a multimodal model (Qwen3-VL,
+   * Qwen3-Omni…) whose top-level config.json has no `num_hidden_layers`.
+   * Absent otherwise. `totalParams` always stays the full model count from
+   * `safetensors.total`.
+   */
+  readonly textConfigUsed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,20 +366,28 @@ function toResolvedModel(
   totalParams: number,
   cfg: Record<string, unknown>,
 ): ResolvedModel {
-  const numLayers = optionalNumber(cfg, 'num_hidden_layers');
+  // Modèles multimodaux (Qwen3-VL, Qwen3-Omni…) : l'architecture du décodeur
+  // texte est dans `text_config`, pas au premier niveau. Le premier niveau
+  // gagne toujours quand `num_hidden_layers` y est présent.
+  const textConfig = isRecord(cfg['text_config']) ? cfg['text_config'] : undefined;
+  const textConfigUsed =
+    textConfig !== undefined && cfg['num_hidden_layers'] === undefined;
+  const arch = textConfigUsed ? textConfig : cfg;
+
+  const numLayers = optionalNumber(arch, 'num_hidden_layers');
   if (numLayers === undefined) {
     throw new HfConfigError('config.json incomplet : num_hidden_layers manquant');
   }
-  const attentionHeads = optionalNumber(cfg, 'num_attention_heads');
-  const kvHeadsDirect = optionalNumber(cfg, 'num_key_value_heads');
+  const attentionHeads = optionalNumber(arch, 'num_attention_heads');
+  const kvHeadsDirect = optionalNumber(arch, 'num_key_value_heads');
   const kvHeads = kvHeadsDirect ?? attentionHeads;
   if (kvHeads === undefined) {
     throw new HfConfigError(
       'config.json incomplet : num_key_value_heads et num_attention_heads manquants',
     );
   }
-  const hiddenSize = optionalNumber(cfg, 'hidden_size');
-  const headDimDirect = optionalNumber(cfg, 'head_dim');
+  const hiddenSize = optionalNumber(arch, 'hidden_size');
+  const headDimDirect = optionalNumber(arch, 'head_dim');
   const headDim = headDimDirect ?? fallbackHeadDim(attentionHeads, hiddenSize);
   if (headDim === undefined) {
     throw new HfConfigError(
@@ -376,16 +396,16 @@ function toResolvedModel(
   }
 
   const numExperts =
-    optionalNumber(cfg, 'num_experts') ??
-    optionalNumber(cfg, 'num_local_experts') ??
-    optionalNumber(cfg, 'n_routed_experts');
-  const expertsPerTok = optionalNumber(cfg, 'num_experts_per_tok');
+    optionalNumber(arch, 'num_experts') ??
+    optionalNumber(arch, 'num_local_experts') ??
+    optionalNumber(arch, 'n_routed_experts');
+  const expertsPerTok = optionalNumber(arch, 'num_experts_per_tok');
   const isMoe =
     numExperts !== undefined && numExperts > 1 &&
     expertsPerTok !== undefined && expertsPerTok > 0;
   const expertIntermediate =
-    optionalNumber(cfg, 'moe_intermediate_size') ??
-    optionalNumber(cfg, 'intermediate_size');
+    optionalNumber(arch, 'moe_intermediate_size') ??
+    optionalNumber(arch, 'intermediate_size');
   const expertFfnSize =
     isMoe && expertIntermediate !== undefined && hiddenSize !== undefined
       ? numLayers * EXPERT_MATRICES * hiddenSize * expertIntermediate
@@ -414,10 +434,10 @@ function toResolvedModel(
       attentionHeads !== undefined
         ? numLayers * hiddenSize * headDim * (2 * attentionHeads + 2 * kvHeads)
         : 0;
-    const vocabSize = optionalNumber(cfg, 'vocab_size');
+    const vocabSize = optionalNumber(arch, 'vocab_size');
     const embeddingParams =
       vocabSize !== undefined
-        ? vocabSize * hiddenSize * (cfg.tie_word_embeddings === true ? 1 : 2)
+        ? vocabSize * hiddenSize * (arch.tie_word_embeddings === true ? 1 : 2)
         : 0;
     const routerParams =
       numExperts !== undefined ? numLayers * hiddenSize * numExperts : 0;
@@ -449,6 +469,7 @@ function toResolvedModel(
     moeTreatedAsDense,
     activeParamsPartial,
     resolvedFromBaseModel: false,
+    ...(textConfigUsed ? { textConfigUsed: true } : {}),
   };
 }
 
