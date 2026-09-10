@@ -296,6 +296,34 @@
       "notes": "Config de départ M5 Ultra : 96 Go + 1 To, à partir de 6 599 € (Apple FR, relevé 04/09/2026). Bande passante 819 Go/s = hypothèse reprise du M3 Ultra, NON confirmée pour le M5 Ultra. FP16 ≈ 42 TFLOPS (estimation : ≈ 21 TFLOPS FP32 × 2). Le M3 Ultra est arrêté (option 512 Go supprimée ~03/2026, 256 Go +500 €)."
     },
     {
+      "id": "nvidia-dgx-b200",
+      "name": "NVIDIA DGX B200",
+      "brand": "NVIDIA",
+      "category": "station",
+      "unifiedMemoryGib": 1440,
+      "bwGbps": 512000,
+      "flopsFp16": 3.6e16,
+      "priceEur": 600000,
+      "priceDate": "2026-09-04",
+      "priceQuality": "estimate",
+      "source": "https://www.nvidia.com/en-us/data-center/dgx-b200/",
+      "notes": "Prix indicatif — NVIDIA ne publie pas de tarif public (ordre de grandeur marché 09/2026). 8 × B200 : ≈ 1,44 To de mémoire unifiée HBM3e, FP16 dense ≈ 36 PFLOPS (ordre de grandeur), TDP châssis ≈ 14,3 kW."
+    },
+    {
+      "id": "nvidia-dgx-b300",
+      "name": "NVIDIA DGX B300",
+      "brand": "NVIDIA",
+      "category": "station",
+      "unifiedMemoryGib": 2304,
+      "bwGbps": 786432,
+      "flopsFp16": 7.2e16,
+      "priceEur": 500000,
+      "priceDate": "2026-09-04",
+      "priceQuality": "estimate",
+      "source": "https://www.nvidia.com/en-us/data-center/dgx-b300/",
+      "notes": "Prix indicatif — NVIDIA ne publie pas de tarif public (ordre de grandeur marché 09/2026). 8 × B300 : ≈ 2,3 To de mémoire unifiée, FP16 dense ≈ 72 PFLOPS (ordre de grandeur), TDP châssis ≈ 20 kW."
+    },
+    {
       "id": "desktop-2gpu",
       "name": "PC de bureau 1-2 GPU",
       "brand": "DIY",

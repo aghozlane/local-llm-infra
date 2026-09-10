@@ -9,7 +9,8 @@
  * Logique de sélection (plan §5.5) :
  * 1. Énumérer : chaque GPU du catalogue × quantité (quantité = nb GPU imposé
  *    par la VRAM, ≤ slots de chaque plateforme) + les stations compactes
- *    (unité simple, pas de multi-unité en v1).
+ *    en 1 à MAX_STATION_UNITS unités (répliques data-parallèles, cf.
+ *    stationUnits).
  * 2. Filtrer : VRAM suffisante **avec marge** (le gpuCount de SizingResult
  *    inclut déjà la marge de sécurité et le ratio ~93 % de VRAM utilisable),
  *    cibles TTFT et débit par utilisateur (dures, si fournies), RAM système
@@ -25,7 +26,8 @@
  * catalogue. Un catalogue sans aucun kit RAM est un bug de donnée : la
  * fonction lève une erreur (pas de repli silencieux).
  */
-import { MAX_GPUS_V1, sizeForHardware } from './formulas';
+import { MAX_GPUS_V1, clampSimultaneous, decodeToksPerUser, sizeForHardware } from './formulas';
+import { bpwFor } from './quantization';
 import type { GpuSpec, ModelSpec, Scenario, SizingResult } from './types';
 import type {
   CatalogGpu,
@@ -64,14 +66,31 @@ export interface GpuPlatformPick {
   readonly sizing: SizingResult;
 }
 
-/** Configuration station IA compacte (mémoire unifiée, unité simple). */
+/**
+ * Plafond d'unités d'une même station compacte (répliques data-parallèles) :
+ * « jusqu'à 4 DGX Spark ». Au-delà, la station est rejetée si une cible dure
+ * reste inatteignable (la charge offerte, indicative, est signalée telle quelle).
+ */
+const MAX_STATION_UNITS = 4;
+
+/**
+ * Configuration station IA compacte (mémoire unifiée).
+ *
+ * Modèle multi-unités (répliques data-parallèles) : chaque unité porte le
+ * modèle ENTIER (pas de striping mémoire — une unité seule incapable de
+ * tenir les poids rejette la station) et les unités se partagent la charge.
+ * `sizing` reste le dimensionnement de l'unité simple ; les totaux affichés
+ * (mémoire, prix, quantité BOM…) sont multipliés par `unitCount`.
+ */
 export interface StationPick {
   readonly kind: 'station';
   readonly station: CatalogStation;
-  /** Prix total en EUR TTC (machine seule, mémoire intégrée). */
+  /** Nombre d'unités identiques (1 à MAX_STATION_UNITS). */
+  readonly unitCount: number;
+  /** Prix total en EUR TTC (unitCount × prix unitaire, mémoire intégrée). */
   readonly totalEur: number;
   readonly bom: readonly BomLine[];
-  /** Résultat de dimensionnement complet de la configuration. */
+  /** Résultat de dimensionnement complet de la configuration (unité simple). */
   readonly sizing: SizingResult;
 }
 
@@ -106,9 +125,9 @@ function pickId(pick: HardwarePick): string {
     : `station:${pick.station.id}`;
 }
 
-/** Nombre de GPU d'une configuration (station = unité simple). */
+/** Nombre d'unités de calcul d'une configuration (station = nb d'unités). */
 function pickGpuCount(pick: HardwarePick): number {
-  return pick.kind === 'gpu-platform' ? pick.gpuCount : 1;
+  return pick.kind === 'gpu-platform' ? pick.gpuCount : pick.unitCount;
 }
 
 /** Une station est vue comme un GPU unique à mémoire unifiée. */
@@ -119,6 +138,89 @@ function stationAsGpuSpec(station: CatalogStation): GpuSpec {
     bwGbps: station.bwGbps,
     flopsFp16: station.flopsFp16,
   };
+}
+
+/** Nombre d'unités d'une station, ou le goulot dur qui la rejette. */
+type StationUnitsResult =
+  | { readonly units: number }
+  | { readonly failure: 'ttft' | 'tps' };
+
+/**
+ * Heuristique multi-unités d'une station compacte (répliques data-parallèles).
+ *
+ * Chaque unité porte le modèle entier (contrôle VRAM fait en amont sur le
+ * sizing unité simple : gpuCount > 1 → rejet, pas de striping mémoire) et
+ * l'unitCount est le goulot dominant parmi :
+ *
+ * 1. Charge offerte : les U répliques absorbent U × le débit agrégé d'une
+ *    unité (la charge se répartit entre répliques) →
+ *    ceil(offeredLoad / aggregateToksPerSec) dès qu'une unité ne suffit pas
+ *    (sinon unitCount = 1).
+ * 2. Cible TTFT : les FLOPS de préfill s'agrègent sur les unités (même
+ *    convention que le multi-GPU du moteur) → ttft(U) = ttft(1) / U.
+ * 3. Cible de débit par utilisateur : les B séquences simultanées se
+ *    répartissent sur les U unités (B/U chacune, au moins 1) → le débit
+ *    par utilisateur s'améliore quand la charge par unité baisse.
+ *
+ * unitCount = max(1, besoins 1-3), plafonné à MAX_STATION_UNITS. La charge
+ * offerte reste indicative (comme pour les GPU : loadSupported n'est pas un
+ * filtre dur du moteur) ; les cibles TTFT/TPS, elles, restent des portes
+ * dures : si le plafond de MAX_STATION_UNITS ne suffit pas, la station est
+ * rejetée.
+ */
+function stationUnits(
+  scenario: Scenario,
+  perUnit: SizingResult,
+  bwGbps: number,
+): StationUnitsResult {
+  const simultaneous = clampSimultaneous(scenario.simultaneous);
+  const bpw = bpwFor(scenario.quant);
+
+  // Débit par utilisateur pour U unités : répartition continue des B
+  // séquences simultanées (B/U par unité, au moins 1 séquence par unité).
+  const tpsForUnits = (units: number): number =>
+    decodeToksPerUser(
+      bwGbps,
+      perUnit.activeParams,
+      bpw,
+      perUnit.kvBytesPerToken,
+      Math.max(1, simultaneous / units),
+      perUnit.averageContextTokens,
+    );
+
+  let units = 1;
+
+  if (!perUnit.loadSupported) {
+    units = Math.max(units, Math.ceil(perUnit.offeredLoadToksPerSec / perUnit.aggregateToksPerSec));
+  }
+
+  if (perUnit.ttftTargetMet === false && scenario.ttftTargetSec !== undefined) {
+    units = Math.max(units, Math.ceil(perUnit.ttftSeconds / scenario.ttftTargetSec));
+  }
+
+  if (perUnit.tpsTargetMet === false && scenario.minTpsPerUser !== undefined) {
+    let smallestViable: number | null = null;
+    for (let candidate = 1; candidate <= MAX_STATION_UNITS; candidate++) {
+      if (tpsForUnits(candidate) >= scenario.minTpsPerUser) {
+        smallestViable = candidate;
+        break;
+      }
+    }
+    if (smallestViable === null) {
+      return { failure: 'tps' };
+    }
+    units = Math.max(units, smallestViable);
+  }
+
+  units = Math.min(MAX_STATION_UNITS, Math.max(1, units));
+
+  if (scenario.ttftTargetSec !== undefined && perUnit.ttftSeconds / units > scenario.ttftTargetSec) {
+    return { failure: 'ttft' };
+  }
+  if (scenario.minTpsPerUser !== undefined && tpsForUnits(units) < scenario.minTpsPerUser) {
+    return { failure: 'tps' };
+  }
+  return { units };
 }
 
 /** Portes dures de cibles : null = OK, sinon la cible non atteinte. */
@@ -232,23 +334,24 @@ export function recommendHardware(
     }
   }
 
-  // --- Stations compactes (unité simple) ---
+  // --- Stations compactes (1 à MAX_STATION_UNITS unités, cf. stationUnits) ---
   for (const station of stations) {
     const sizing = sizeForHardware(spec, scenario, stationAsGpuSpec(station));
     if (sizing.gpuCount > 1) {
       rejected.vram += 1;
       continue;
     }
-    const failure = targetFailure(sizing);
-    if (failure !== null) {
-      rejected[failure] += 1;
+    const stationUnitsResult = stationUnits(scenario, sizing, station.bwGbps);
+    if ('failure' in stationUnitsResult) {
+      rejected[stationUnitsResult.failure] += 1;
       continue;
     }
-    const totalEur = roundEur(station.priceEur);
+    const unitCount = stationUnitsResult.units;
+    const totalEur = roundEur(station.priceEur * unitCount);
     const bom: BomLine[] = [
-      { label: station.name, quantity: 1, unitPriceEur: station.priceEur, totalEur },
+      { label: station.name, quantity: unitCount, unitPriceEur: station.priceEur, totalEur },
     ];
-    candidates.push({ kind: 'station', station, totalEur, bom, sizing });
+    candidates.push({ kind: 'station', station, unitCount, totalEur, bom, sizing });
   }
 
   // --- Aucune configuration viable ---
