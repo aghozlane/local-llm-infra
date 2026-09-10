@@ -15,14 +15,18 @@ const ROLE_LABELS = {
 export function RecommendationCard({ recommendation }: RecommendationCardProps) {
   const { role, pick } = recommendation;
   const sizing = pick.sizing;
+  const stationUnitCount = pick.kind === 'station' ? pick.unitCount : 1;
 
   const configLine =
     pick.kind === 'gpu-platform'
       ? `${pick.gpuCount} × ${pick.gpu.name} — ${pick.platform.name}`
-      : pick.station.name;
+      : stationUnitCount > 1
+        ? `${stationUnitCount} × ${pick.station.name}`
+        : pick.station.name;
 
-  const ramGib = pick.kind === 'gpu-platform' ? pick.ramGib : pick.station.unifiedMemoryGib;
-  const gpuCount = pick.kind === 'gpu-platform' ? pick.gpuCount : 1;
+  const ramGib =
+    pick.kind === 'gpu-platform' ? pick.ramGib : pick.station.unifiedMemoryGib * stationUnitCount;
+  const gpuCount = pick.kind === 'gpu-platform' ? pick.gpuCount : stationUnitCount;
 
   return (
     <article className="card recommendation-card">
